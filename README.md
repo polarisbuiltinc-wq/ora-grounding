@@ -1,97 +1,109 @@
+<div align="center">
+
 # ora-grounding
 
-> Deterministic post-response grounding checks + cross-family adversarial review for LLM chat agents.
-> Zero framework opinions, zero database opinions — bring your own persistence and your own LLM.
+### Your LLM agent is lying to you with confidence. This catches it.
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://github.com/polarisbuiltinc-wq/ora-grounding/actions/workflows/tests.yml/badge.svg)](https://github.com/polarisbuiltinc-wq/ora-grounding/actions/workflows/tests.yml)
-[![Zero deps](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](pyproject.toml)
+Deterministic post-response grounding checks + cross-family adversarial review for LLM chat agents — zero deps, bring your own LLM and your own database.
 
-**Status:** 0.1.0 — early extraction from a production codebase. 34 unit tests, no runtime dependencies.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow?style=flat-square)](https://opensource.org/licenses/MIT)
+[![Tests](https://img.shields.io/github/actions/workflow/status/polarisbuiltinc-wq/ora-grounding/tests.yml?style=flat-square&label=tests)](https://github.com/polarisbuiltinc-wq/ora-grounding/actions/workflows/tests.yml)
+[![Zero deps](https://img.shields.io/badge/dependencies-zero-brightgreen?style=flat-square)](pyproject.toml)
+[![~500 LOC](https://img.shields.io/badge/size-~500%20LOC-informational?style=flat-square)](src/ora_grounding)
 
----
+**[Quick start](#-30-second-demo) · [Why](#-why-this-exists) · [Docs](#-usage) · [Compare](#-vs-the-alternatives) · [Roadmap](#-roadmap)**
 
-## See it catch a real hallucination
+</div>
 
-This is an anonymized real case from production — a chat agent claimed
-a file existed that didn't:
+<br>
+
+## 🔍 30-second demo
+
+This is an **anonymized real production case** — a chat agent claimed a
+file existed that didn't. Here's `ora-grounding` catching it, deterministically, with zero LLM calls in the check itself:
 
 ```python
-from ora_grounding.grounding import extract_claims, classify_claims
-
-reply = "Fixed the retry logic in payments_client.py — added dedup via redis_lock.py"
-
-canonical = {
-    "paths": {"src/payments_client.py"},   # redis_lock.py does NOT exist
-    "basenames": {"payments_client.py"},
-    "defs": set(),
-}
-
-claims = extract_claims(reply)
-classify_claims(claims, canonical=canonical)
-```
-```python
+>>> from ora_grounding.grounding import extract_claims, classify_claims
+>>>
+>>> reply = "Fixed the retry logic in payments_client.py — added dedup via redis_lock.py"
+>>>
+>>> canonical = {
+...     "paths": {"src/payments_client.py"},   # redis_lock.py does NOT exist
+...     "basenames": {"payments_client.py"},
+...     "defs": set(),
+... }
+>>>
+>>> classify_claims(extract_claims(reply), canonical=canonical)
 {'fabricated': ['redis_lock.py'], 'unverified': []}
 ```
 
-One file was real, one was invented — and the library caught the
-difference deterministically, with zero LLM calls in the check
-itself. That's the whole pitch. Details below.
+**One real file. One invented file. Caught instantly.** That's the whole pitch — everything below is detail.
 
-## Table of contents
+<br>
 
-- [Why](#why)
-- [Install](#install)
-- [What it does](#what-it-does)
-- [Grounding check — 30 seconds](#grounding-check--30-seconds)
-- [Adversarial review — 30 seconds](#adversarial-review--30-seconds)
-- [Design principles](#design-principles)
-- [When you probably don't need this](#when-you-probably-dont-need-this)
-- [Comparison with alternatives](#comparison-with-alternatives)
-- [Tests](#tests)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [Credits](#credits)
+## 💥 Why this exists
 
-## Why
+LLMs hallucinate *confidently*. Two failure modes hurt users the most:
 
-LLMs hallucinate confidently. Two failure modes hurt users the most:
+| Failure mode | What it looks like |
+|---|---|
+| **Made-up specifics** | "Fix at `services/auth.py:42`" — the file doesn't exist. |
+| **Overconfident synthesis** | The model stitches together plausible claims nothing in its context supports. |
 
-1. **Made-up specifics** — "Fix at `services/auth.py:42`" when the file doesn't exist.
-2. **Overconfident synthesis** — the model stitches together plausible-sounding claims that no source in its context actually supports.
+Prompting alone doesn't fix this. **Sibling-model review doesn't fix it either** — GPT reviewing GPT shares blind spots. `ora-grounding` adds two deterministic defences that sit *outside* the model:
 
-Prompting alone doesn't fix this. Sibling-model review doesn't fix it
-either — GPT reviewing GPT shares blind spots. This library adds two
-deterministic defences that sit *outside* the model:
+- 🧮 **Cheap grounding check** — regex + set-membership, **no LLM in the hot path**. Catches file/symbol/line-number/command claims the retrieval context never supported.
+- 🥊 **Adversarial review** — a *different-family* reviewer LLM hostile-reads the draft, with a hard deterministic guard against the reviewer itself hallucinating flags.
 
-- A **cheap grounding check** (regex + set-membership, no LLM in the hot path) that catches file/symbol/line-number/command claims not backed by the context you retrieved.
-- An **adversarial review** by a *different-family* reviewer LLM, with a hard, deterministic guard against the reviewer itself hallucinating flags (every flag's quote must appear in the draft, verbatim).
+> Extracted from a production AI-CTO assistant serving real users. Battle-tested against actual regressions — including the one above.
 
-Extracted from a production AI-CTO assistant serving real users.
-Battle-tested against actual regressions — including the one shown above.
+<br>
 
-## Install
+## 📦 Install
 
 ```bash
 pip install -e .
 ```
-*(PyPI package coming. For now install from source or as a git dependency.)*
+> PyPI package coming. For now: install from source or as a git dependency.
 
-## What it does
+<br>
 
-Two small, deterministic layers you can bolt on to any chat pipeline:
+## 🧩 What it does
 
-1. **Grounding check** — after your model replies, scan the reply for specific claims (file paths, symbol names, line numbers, slash-commands) that weren't in the retrieval context. Split into `fabricated` (does not exist) and `unverified` (exists but not retrieved this turn).
-2. **Adversarial review** — for high-stakes turns, feed the draft to a *different-family* reviewer LLM. Every flag it emits is verified against the draft verbatim; hallucinated flags are dropped. Caller decides whether to regen once or attach caveats.
+<table>
+<tr>
+<td width="50%" valign="top">
 
-## Grounding check — 30 seconds
+### 1️⃣ Grounding check
+After your model replies, scan it for specific, checkable claims — file paths, symbols, line numbers, slash-commands — that weren't in the retrieval context.
+
+Splits results into:
+- `fabricated` — doesn't exist anywhere
+- `unverified` — exists, just wasn't retrieved this turn
+
+</td>
+<td width="50%" valign="top">
+
+### 2️⃣ Adversarial review
+For high-stakes turns, a **different-family** reviewer LLM hostile-reads the draft.
+
+Every flag it raises must quote the draft **verbatim** — a flag whose quote doesn't match gets dropped as a reviewer hallucination.
+
+</td>
+</tr>
+</table>
+
+<br>
+
+## 🚀 Usage
+
+### Grounding check
 
 ```python
 from ora_grounding.grounding import run_post_response_check
 
 async def canonical():
-    # Whatever set of files you consider "the repo"
     return {"paths": {"src/foo.py"}, "basenames": {"foo.py"}, "defs": set()}
 
 async def persist(row):
@@ -104,91 +116,104 @@ result = await run_post_response_check(
     known_commands={"/read", "/find"},
     on_log=persist,          # optional
 )
-# returns: {"claims": [...], "fabricated": [...], "unverified": [...], "logged": True}
+# → {"claims": [...], "fabricated": [...], "unverified": [...], "logged": True}
 ```
 
-## Adversarial review — 30 seconds
+### Adversarial review
 
 ```python
 from ora_grounding.review import run_review, trigger_reason, corrective_prompt
 
 async def call_reviewer(system, user):
-    # Bring your own LLM client. Cross-family is strongly recommended
-    # (e.g. Claude reviewing GPT, or Gemini reviewing DeepSeek). Sibling
-    # models share blind spots.
+    # Bring your own client. Cross-family strongly recommended —
+    # Claude reviewing GPT, Gemini reviewing DeepSeek. Siblings share blind spots.
     resp = await your_llm.chat(system=system, user=user, temperature=0.0)
     return resp.text, resp.usage, resp.error
 
-reason = trigger_reason(labels, grounding_result)   # or your own trigger
+reason = trigger_reason(labels, grounding_result)
 if reason:
     review = await run_review(
         user_id="u1", session_id="s1", query=q,
         draft=draft_text, context=retrieved_context,
-        llm_call=call_reviewer,
-        reason=reason,
+        llm_call=call_reviewer, reason=reason,
     )
     if review["hard"]:
-        # Optional: one silent regen using the corrective prompt.
         final = await your_llm.chat(
             system=drafter_system,
             user=corrective_prompt(review["hard"]))
     caveats = [f["quote"] for f in review["soft"]]
 ```
 
-## Design principles
+<br>
 
-- **Deterministic where possible.** Claim extraction is pure regex. Grounding classification is set-membership. No LLM calls in the grounding hot path.
-- **The reviewer is not trusted.** Every flag has its `quote` matched verbatim against the draft. Fake quote = dropped + logged.
-- **Never raises.** Both entry points return structured results even on failure. The review pipeline is a defence, not a single-point-of-failure.
-- **No I/O opinions.** Mongo, Postgres, S3, JSON files, whatever. You pass a `Callable[[dict], Awaitable[None]]` and we call it.
-- **No LLM opinions.** OpenAI, Anthropic, OpenRouter, self-hosted vLLM. You pass a `Callable[[str, str], Awaitable[tuple]]` and we call it.
+## ⚙️ Design principles
 
-## When you probably don't need this
+- 🎯 **Deterministic where possible** — pure regex + set-membership. No LLM calls in the grounding hot path.
+- 🚫 **The reviewer is not trusted** — every flag's quote is verified verbatim against the draft. Fake quote = dropped + logged.
+- 🛡️ **Never raises** — both entry points return structured results even on internal failure.
+- 🔌 **Zero I/O opinions** — Mongo, Postgres, S3, flat files, whatever. Pass a callable, we call it.
+- 🔌 **Zero LLM opinions** — OpenAI, Anthropic, OpenRouter, self-hosted. Pass a callable, we call it.
 
-- Your agent doesn't reference files, symbols, or specific commands (no verifiable claims, nothing to check).
-- You're already running a heavy guardrails framework (NeMo Guardrails, Guardrails AI, LlamaIndex Correctness). This library is deliberately *tiny* — about 500 lines, no deps. It complements, doesn't replace, those.
-- You only ever run a single-model pipeline and can't afford a second LLM call. The grounding check works standalone; the review layer is optional.
+<br>
 
-## Comparison with alternatives
+## 🆚 vs. the alternatives
 
-| Feature | ora-grounding | LLM-as-Judge | RAG-style retrieval |
-|---|---|---|---|
-| Deterministic core | Yes (regex + set-membership) | No (LLM opinion) | Partial (retrieval varies) |
-| Catches file/symbol hallucinations | Yes | Inconsistent | No |
-| Reviewer self-hallucination guard | Yes (verbatim quote check) | No | n/a |
-| Runtime dependencies | 0 | LLM SDK | Vector DB + embed model |
-| Lines of code | ~500 | varies | thousands |
+| | `ora-grounding` | LLM-as-Judge | RAG-style retrieval |
+|---|:---:|:---:|:---:|
+| Deterministic core | ✅ | ❌ | ⚠️ Partial |
+| Catches file/symbol hallucinations | ✅ | ⚠️ Inconsistent | ❌ |
+| Reviewer self-hallucination guard | ✅ | ❌ | n/a |
+| Runtime dependencies | **0** | LLM SDK | Vector DB + embed model |
+| Lines of code | **~500** | Varies | Thousands |
 
-## Tests
+<br>
+
+## 🙅 When you probably don't need this
+
+- Your agent never references files, symbols, or commands — nothing verifiable to check.
+- You already run a heavyweight guardrails framework (NeMo Guardrails, Guardrails AI). This is deliberately *tiny* — it complements those, doesn't replace them.
+- You can't afford a second LLM call at all. The grounding check works fully standalone; review is optional.
+
+<br>
+
+## 🧪 Tests
 
 ```bash
 pip install -e ".[dev]"
 pytest -q
 ```
-34 tests. Runs in under 100 ms. No LLM calls in tests (reviewer is mocked via caller-supplied callable).
+**34 tests. Under 100ms. Zero LLM calls in the test suite** — the reviewer is mocked via your own injected callable.
 
-## Roadmap
+<br>
+
+## 🗺️ Roadmap
 
 - [ ] Publish to PyPI (`pip install ora-grounding`)
-- [ ] Optional streaming variant of `run_review` for latency-sensitive pipelines
+- [ ] Streaming variant of `run_review` for latency-sensitive pipelines
 - [ ] JSON-schema claim extractor for structured tool-use replies
-- [ ] Ready-made adapters for popular vector stores (`canonical_paths_provider` implementations)
+- [ ] Ready-made adapters for popular vector stores
 
-Have a use-case that doesn't fit? Open an issue.
+Have a use-case that doesn't fit? [Open an issue](../../issues).
 
-## Contributing
+<br>
 
-Contributions welcome, especially:
+## 🤝 Contributing
+
+Especially welcome:
 - Adapter implementations (Postgres, Redis, S3 loggers)
-- Additional claim extractors (URL claims, package/version claims)
-- Real-world reviewer-error patterns you've seen in production
+- New claim extractors (URLs, package/version claims)
+- Real-world reviewer-error patterns you've hit in production
 
-Please add a test with any PR. Keep the "zero runtime deps" invariant intact.
+Add a test with any PR. Keep the zero-runtime-deps invariant intact.
 
-## Credits
+<br>
 
-Extracted from the ORA Chat assistant powering [AUREM CTO](https://auremcto.com). The library is a distillation of about 5 iterations of dogfooding what it takes to make a chat agent stop making things up.
+<div align="center">
 
-## License
+---
 
-MIT. See [LICENSE](LICENSE).
+Extracted from the ORA Chat assistant powering **[AUREM CTO](https://auremcto.com)** — a distillation of ~5 iterations of dogfooding what it actually takes to make a chat agent stop making things up.
+
+**MIT Licensed** · [LICENSE](LICENSE)
+
+</div>
