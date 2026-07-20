@@ -1,49 +1,91 @@
 # ora-grounding
 
 > Deterministic post-response grounding checks + cross-family adversarial review for LLM chat agents.
-> Zero framework opinions, zero database opinions -- bring your own persistence and your own LLM.
+> Zero framework opinions, zero database opinions — bring your own persistence and your own LLM.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Tests](https://github.com/polarisbuiltinc-wq/ora-grounding/actions/workflows/tests.yml/badge.svg)](https://github.com/polarisbuiltinc-wq/ora-grounding/actions/workflows/tests.yml)
-[![Zero deps](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](./pyproject.toml)
+[![Zero deps](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](pyproject.toml)
 
-**Status:** 0.1.0 -- early extraction from a production codebase. API may still evolve. 34 unit tests, no runtime dependencies.
+**Status:** 0.1.0 — early extraction from a production codebase. 34 unit tests, no runtime dependencies.
 
 ---
 
-## Why?
+## See it catch a real hallucination
+
+This is an anonymized real case from production — a chat agent claimed
+a file existed that didn't:
+
+```python
+from ora_grounding.grounding import extract_claims, classify_claims
+
+reply = "Fixed the retry logic in payments_client.py — added dedup via redis_lock.py"
+
+canonical = {
+    "paths": {"src/payments_client.py"},   # redis_lock.py does NOT exist
+    "basenames": {"payments_client.py"},
+    "defs": set(),
+}
+
+claims = extract_claims(reply)
+classify_claims(claims, canonical=canonical)
+```
+```python
+{'fabricated': ['redis_lock.py'], 'unverified': []}
+```
+
+One file was real, one was invented — and the library caught the
+difference deterministically, with zero LLM calls in the check
+itself. That's the whole pitch. Details below.
+
+## Table of contents
+
+- [Why](#why)
+- [Install](#install)
+- [What it does](#what-it-does)
+- [Grounding check — 30 seconds](#grounding-check--30-seconds)
+- [Adversarial review — 30 seconds](#adversarial-review--30-seconds)
+- [Design principles](#design-principles)
+- [When you probably don't need this](#when-you-probably-dont-need-this)
+- [Comparison with alternatives](#comparison-with-alternatives)
+- [Tests](#tests)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [Credits](#credits)
+
+## Why
 
 LLMs hallucinate confidently. Two failure modes hurt users the most:
 
-1. **Made-up specifics** -- "Fix at `services/auth.py:42`" when the file doesn't exist.
-2. **Overconfident synthesis** -- the model stitches together plausible-sounding claims that no source in its context actually supports.
+1. **Made-up specifics** — "Fix at `services/auth.py:42`" when the file doesn't exist.
+2. **Overconfident synthesis** — the model stitches together plausible-sounding claims that no source in its context actually supports.
 
-Prompting alone doesn't fix this. Sibling-model review doesn't fix it either -- GPT reviewing GPT shares blind spots. This library adds two deterministic defences that sit *outside* the model:
+Prompting alone doesn't fix this. Sibling-model review doesn't fix it
+either — GPT reviewing GPT shares blind spots. This library adds two
+deterministic defences that sit *outside* the model:
 
 - A **cheap grounding check** (regex + set-membership, no LLM in the hot path) that catches file/symbol/line-number/command claims not backed by the context you retrieved.
 - An **adversarial review** by a *different-family* reviewer LLM, with a hard, deterministic guard against the reviewer itself hallucinating flags (every flag's quote must appear in the draft, verbatim).
 
-Extracted from a production AI-CTO assistant serving real users. Battle-tested against actual regressions.
-
----
+Extracted from a production AI-CTO assistant serving real users.
+Battle-tested against actual regressions — including the one shown above.
 
 ## Install
 
 ```bash
 pip install -e .
 ```
-
 *(PyPI package coming. For now install from source or as a git dependency.)*
 
 ## What it does
 
 Two small, deterministic layers you can bolt on to any chat pipeline:
 
-1. **Grounding check** -- after your model replies, scan the reply for specific claims (file paths, symbol names, line numbers, slash-commands) that weren't in the retrieval context. Split into `fabricated` (does not exist) and `unverified` (exists but not retrieved this turn).
-2. **Adversarial review** -- for high-stakes turns, feed the draft to a *different-family* reviewer LLM. Every flag it emits is verified against the draft verbatim; hallucinated flags are dropped. Caller decides whether to regen once or attach caveats.
+1. **Grounding check** — after your model replies, scan the reply for specific claims (file paths, symbol names, line numbers, slash-commands) that weren't in the retrieval context. Split into `fabricated` (does not exist) and `unverified` (exists but not retrieved this turn).
+2. **Adversarial review** — for high-stakes turns, feed the draft to a *different-family* reviewer LLM. Every flag it emits is verified against the draft verbatim; hallucinated flags are dropped. Caller decides whether to regen once or attach caveats.
 
-## Grounding check (30 seconds)
+## Grounding check — 30 seconds
 
 ```python
 from ora_grounding.grounding import run_post_response_check
@@ -65,7 +107,7 @@ result = await run_post_response_check(
 # returns: {"claims": [...], "fabricated": [...], "unverified": [...], "logged": True}
 ```
 
-## Adversarial review (30 seconds)
+## Adversarial review — 30 seconds
 
 ```python
 from ora_grounding.review import run_review, trigger_reason, corrective_prompt
@@ -104,18 +146,18 @@ if reason:
 ## When you probably don't need this
 
 - Your agent doesn't reference files, symbols, or specific commands (no verifiable claims, nothing to check).
-- You're already running a heavy guardrails framework (NeMo Guardrails, Guardrails AI, LlamaIndex Correctness). This library is deliberately *tiny* -- about 500 lines, no deps. It complements, doesn't replace, those.
+- You're already running a heavy guardrails framework (NeMo Guardrails, Guardrails AI, LlamaIndex Correctness). This library is deliberately *tiny* — about 500 lines, no deps. It complements, doesn't replace, those.
 - You only ever run a single-model pipeline and can't afford a second LLM call. The grounding check works standalone; the review layer is optional.
 
 ## Comparison with alternatives
 
-| Feature                                | ora-grounding                | LLM-as-Judge      | RAG-style retrieval        |
-| -------------------------------------- | ---------------------------- | ----------------- | -------------------------- |
-| Deterministic core                     | Yes (regex + set-membership) | No (LLM opinion)  | Partial (retrieval varies) |
-| Catches file/symbol hallucinations     | Yes                          | Inconsistent      | No                         |
-| Reviewer self-hallucination guard      | Yes (verbatim quote check)   | No                | n/a                        |
-| Runtime dependencies                   | 0                            | LLM SDK           | Vector DB + embed model    |
-| Lines of code                          | ~500                         | varies            | thousands                  |
+| Feature | ora-grounding | LLM-as-Judge | RAG-style retrieval |
+|---|---|---|---|
+| Deterministic core | Yes (regex + set-membership) | No (LLM opinion) | Partial (retrieval varies) |
+| Catches file/symbol hallucinations | Yes | Inconsistent | No |
+| Reviewer self-hallucination guard | Yes (verbatim quote check) | No | n/a |
+| Runtime dependencies | 0 | LLM SDK | Vector DB + embed model |
+| Lines of code | ~500 | varies | thousands |
 
 ## Tests
 
@@ -123,7 +165,6 @@ if reason:
 pip install -e ".[dev]"
 pytest -q
 ```
-
 34 tests. Runs in under 100 ms. No LLM calls in tests (reviewer is mocked via caller-supplied callable).
 
 ## Roadmap
@@ -138,7 +179,6 @@ Have a use-case that doesn't fit? Open an issue.
 ## Contributing
 
 Contributions welcome, especially:
-
 - Adapter implementations (Postgres, Redis, S3 loggers)
 - Additional claim extractors (URL claims, package/version claims)
 - Real-world reviewer-error patterns you've seen in production
@@ -151,4 +191,4 @@ Extracted from the ORA Chat assistant powering [AUREM CTO](https://auremcto.com)
 
 ## License
 
-MIT. See [LICENSE](./LICENSE).
+MIT. See [LICENSE](LICENSE).
