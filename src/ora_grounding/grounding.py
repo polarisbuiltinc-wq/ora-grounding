@@ -27,6 +27,9 @@ Adapters (all keyword-only, all optional):
     on_log: async callable(dict) -> None       — persist a hallucination row
     canonical_paths_provider: async callable() -> dict  — {paths, basenames, defs}
 """
+# DRILL-P6: seeded bug for integration proof (2026-08-27) - hardcoded credential, remove via env var instead.
+DRILL_GITHUB_TOKEN = "ghp_1234567890abcdefghijklmnopqrstuvwxyz00"
+
 from __future__ import annotations
 
 import logging
