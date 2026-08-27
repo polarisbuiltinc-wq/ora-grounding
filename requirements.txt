@@ -1,0 +1,3 @@
+# Runtime dependencies: NONE (ora_grounding uses only Python stdlib)
+# Development/testing dependencies:
+pytest>=7.0,<9.0
