@@ -1,4 +1,4 @@
-// double-click race test v3
+// double-click race test v5
 // QA regression test marker
 # aurem qa countdown proof
 <div align="center">
@@ -63,124 +63,75 @@ Prompting alone doesn't fix this. **Sibling-model review doesn't fix it either**
 
 <br>
 
-## 🚀 Quick start
+## 🚀 Usage
+
+### Install
 
 ```bash
 pip install ora-grounding
 ```
 
-```python
-from ora_grounding.grounding import extract_claims, classify_claims
-from ora_grounding.review import adversarial_review
+Zero dependencies. Python 3.10+.
 
-# 1. Grounding check (deterministic, no LLM)
-canonical = {
-    "paths": {"src/auth.py", "src/db.py"},
-    "basenames": {"auth.py", "db.py"},
-    "defs": {"verify_token", "get_user"},
-}
-result = classify_claims(
-    extract_claims("Fixed verify_token in auth.py and added redis_lock.py"),
-    canonical=canonical,
-)
-print(result)  # {'fabricated': ['redis_lock.py'], 'unverified': []}
-
-# 2. Adversarial review (cross-family LLM)
-review = adversarial_review(
-    draft="Added rate limiting to all endpoints",
-    context="<your retrieval context>",
-    llm_call=your_llm_function,  # bring your own LLM
-)
-if review["flags"]:
-    print(f"Reviewer found issues: {review['flags']}")
-```
-
-<br>
-
-## 📖 Usage
-
-### Grounding check
-
-The grounding check is **deterministic** — no LLM in the hot path. It extracts file paths, symbols, and line numbers from the agent's reply, then checks them against a canonical set you provide (from your retrieval context).
+### Quick start
 
 ```python
 from ora_grounding.grounding import extract_claims, classify_claims
 
-# Build canonical set from your retrieval context
+# 1. Your agent generates a reply
+reply = "Fixed auth.py line 42 and added redis_lock.py"
+
+# 2. Build the canonical set from your retrieval context
 canonical = {
-    "paths": {"backend/auth.py", "backend/db.py"},
-    "basenames": {"auth.py", "db.py"},
-    "defs": {"verify_token", "get_user", "hash_password"},
+    "paths": {"backend/auth.py"},  # redis_lock.py doesn't exist
+    "basenames": {"auth.py"},
+    "defs": set(),
 }
 
-# Extract claims from agent reply
-claims = extract_claims(
-    "Fixed the bug in verify_token (auth.py:42) and added redis_lock.py"
-)
-
-# Classify: fabricated (not in canonical) vs unverified (plausible but not confirmed)
-result = classify_claims(claims, canonical=canonical)
+# 3. Check
+result = classify_claims(extract_claims(reply), canonical=canonical)
 print(result)
-# {'fabricated': ['redis_lock.py'], 'unverified': ['auth.py:42']}
+# {'fabricated': ['redis_lock.py'], 'unverified': ['line 42']}
 ```
-
-**What counts as fabricated:**
-- File paths not in `canonical["paths"]` or `canonical["basenames"]`
-- Function/class names not in `canonical["defs"]`
-- Line numbers (always unverified unless you pass line-level ground truth)
-
-**What counts as unverified:**
-- Claims that *could* be true but aren't in the canonical set (e.g. line numbers, commands)
-
-<br>
 
 ### Adversarial review
 
-The adversarial review uses a **different-family LLM** to hostile-read the draft. The reviewer is instructed to find overconfident claims, missing context, and fabricated specifics.
-
 ```python
 from ora_grounding.review import adversarial_review
 
-def my_llm_call(messages):
-    # Your LLM integration (OpenAI, Anthropic, etc.)
-    # Must return a string (the reviewer's response)
-    return client.chat.completions.create(
-        model="gpt-4",
-        messages=messages,
-    ).choices[0].message.content
+# Your agent's draft reply
+draft = "Fixed the payment retry logic in payments_client.py"
 
-review = adversarial_review(
-    draft="Added rate limiting to all endpoints using Redis",
-    context="<your retrieval context — the files/docs the agent had access to>",
-    llm_call=my_llm_call,
+# The retrieval context it had
+context = """File: backend/services/payments.py
+class PaymentService:
+    def process_payment(self, amount): ...
+"""
+
+# Review with a different-family LLM
+result = adversarial_review(
+    draft=draft,
+    context=context,
+    reviewer_llm=your_llm_function,  # e.g. Anthropic Claude
 )
 
-if review["flags"]:
-    print(f"Reviewer found {len(review['flags'])} issues:")
-    for flag in review["flags"]:
-        print(f"  - {flag}")
-else:
-    print("Draft passed review")
+if result["flags"]:
+    print("Reviewer found issues:", result["flags"])
 ```
-
-**The reviewer is instructed to:**
-- Flag claims not supported by the context
-- Flag overconfident synthesis ("this will reduce latency by 40%")
-- Flag made-up file paths, line numbers, or function names
-
-**Deterministic guard:** The review result is parsed with a strict regex. If the reviewer hallucinates flags (e.g. invents a file path that's not in the draft), those flags are dropped.
 
 <br>
 
-## 🆚 vs. the alternatives
+## 📊 vs. the alternatives
 
-| Approach | Speed | Accuracy | Cost |
-|---|---|---|---|
-| **Prompting alone** | Fast | Low | $ |
-| **Sibling-model review** (GPT reviews GPT) | Slow | Medium | $$$ |
-| **ora-grounding** (deterministic + cross-family) | Fast | High | $ |
+| Approach | Speed | Catches fabricated files | Catches overconfident synthesis | Cross-family |
+|---|---|---|---|---|
+| **Prompting alone** | Fast | ❌ | ❌ | N/A |
+| **Same-family review** | Slow | ⚠️ | ⚠️ | ❌ |
+| **ora-grounding** | Fast | ✅ | ✅ | ✅ |
 
-**Why cross-family matters:** GPT-4 reviewing GPT-4 shares blind spots. A Claude reviewer catches different failure modes. The deterministic grounding check catches the rest.
+- **Prompting alone** — "Be accurate. Don't hallucinate." — doesn't work. The model doesn't know when it's wrong.
+- **Same-family review** — GPT-4 reviewing GPT-4 shares blind spots. Both models have the same training biases.
+- **ora-grounding** — deterministic check + adversarial cross-family review. Different models, different failure modes.
 
 <br>
 
@@ -188,22 +139,34 @@ else:
 
 - [x] Deterministic grounding check
 - [x] Cross-family adversarial review
-- [ ] Line-level grounding (verify line numbers against actual file content)
-- [ ] Multi-turn review (reviewer can request clarification)
-- [ ] Confidence scoring (how likely is this claim to be fabricated?)
+- [ ] Pre-built reviewer configs (Claude, Gemini, Llama)
+- [ ] Batch review API
+- [ ] Confidence scoring
+- [ ] Integration examples (LangChain, LlamaIndex)
 
 <br>
 
-## 📜 License
+## 📄 License
 
 MIT — see [LICENSE](LICENSE).
 
 <br>
 
-## 🙏 Credits
+## 🤝 Contributing
 
-Extracted from [AUREM](https://aurem.com) — an AI-CTO assistant that reads your GitHub repo, fixes real issues, and ships as a commit. Built by the AUREM team.
+PRs welcome. Run tests:
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+<br>
 
 ---
 
-**Questions? Issues?** Open an issue or PR — we're actively maintaining this.
+<div align="center">
+
+**Built by [Polaris Built Inc.](https://polarisbuilt.com)** · Extracted from production AI-CTO assistant
+
+</div>
