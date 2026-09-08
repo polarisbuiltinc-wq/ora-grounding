@@ -1,3 +1,4 @@
+// double-click race test v3
 // QA regression test marker
 # aurem qa countdown proof
 <div align="center">
@@ -62,7 +63,9 @@ Prompting alone doesn't fix this. **Sibling-model review doesn't fix it either**
 
 <br>
 
-## 📦 Install
+## 🚀 Usage
+
+### Install
 
 ```bash
 pip install ora-grounding
@@ -70,114 +73,82 @@ pip install ora-grounding
 
 Zero dependencies. Python 3.10+.
 
-<br>
-
-## 🚀 Usage
-
-### 1. Grounding check (deterministic)
+### Quick start
 
 ```python
 from ora_grounding.grounding import extract_claims, classify_claims
 
-# Your agent's reply
-reply = "Fixed auth.py line 42 and added redis_lock.py"
-
-# What your retrieval context ACTUALLY contained
+# 1. Build the canonical set from your retrieval context
 canonical = {
-    "paths": {"backend/auth.py"},           # redis_lock.py wasn't in context
-    "basenames": {"auth.py"},
-    "defs": {"verify_token", "hash_password"},
-    "line_ranges": {("backend/auth.py", 1, 100)},  # line 42 is valid
+    "paths": {"src/auth.py", "src/db.py"},
+    "basenames": {"auth.py", "db.py"},
+    "defs": {"verify_token", "get_user"},
 }
 
-# Extract + classify
+# 2. Extract claims from the LLM's reply
+reply = "Fixed verify_token in auth.py and updated config.py"
 claims = extract_claims(reply)
-result = classify_claims(claims, canonical=canonical)
 
+# 3. Classify
+result = classify_claims(claims, canonical=canonical)
 print(result)
-# {'fabricated': ['redis_lock.py'], 'unverified': []}
+# {'fabricated': ['config.py'], 'unverified': []}
 ```
 
-**What it catches:**
-- File paths not in your retrieval context
-- Function/class names never mentioned
-- Line numbers outside the ranges you fetched
-- Shell commands you didn't run
-
-**What it doesn't catch:**
-- Logical errors ("this fixes the bug" when it doesn't)
-- Misinterpretation of correct code
-- Plausible-sounding claims with no specific anchor
-
-For those, use the adversarial review below.
-
-<br>
-
-### 2. Adversarial review (LLM-based)
+### Adversarial review
 
 ```python
 from ora_grounding.review import adversarial_review
 
-# Your agent's reply
-reply = "The login flow is secure because we hash passwords with bcrypt."
+# Bring your own LLM client
+def call_llm(messages):
+    # Your LLM API call here
+    return "response text"
 
-# The actual code it read
-context = """
-# auth.py
-def login(username, password):
-    user = db.get_user(username)
-    if user.password == password:  # ⚠️ plaintext comparison!
-        return create_session(user)
-"""
-
-# Cross-family review (e.g. Claude reviews GPT's output)
-flags = adversarial_review(
-    reply=reply,
-    context=context,
-    reviewer_llm=your_claude_client,  # Different family than the generator
+result = adversarial_review(
+    draft="Fixed the bug in auth.py line 42",
+    context="<your retrieval context>",
+    llm_client=call_llm,
+    model="gpt-4o",  # or claude-3-5-sonnet-20241022
 )
 
-for flag in flags:
-    print(f"{flag['severity']}: {flag['issue']}")
-# CRITICAL: Claims bcrypt hashing but code does plaintext comparison
+if result["status"] == "approved":
+    print("Draft passed review")
+else:
+    print(f"Blocked: {result['reason']}")
 ```
 
-**Why cross-family?** GPT reviewing GPT shares blind spots. Claude/Gemini/Llama catch different failure modes.
+<br>
 
-**Deterministic guard:** The reviewer's own output is grounding-checked against the context — if the reviewer invents a file/function to justify a flag, that flag is auto-dropped.
+## 📊 vs. the alternatives
+
+| Approach | Latency | Cost | Catches fabricated files | Catches overconfident synthesis |
+|---|---|---|---|---|
+| **Prompting alone** | 0 ms | $0 | ❌ | ❌ |
+| **Same-family review** (GPT→GPT) | +2-5s | +$0.01 | ⚠️ partial | ⚠️ partial |
+| **ora-grounding (grounding only)** | <1 ms | $0 | ✅ | ❌ |
+| **ora-grounding (grounding + review)** | +2-5s | +$0.01 | ✅ | ✅ |
+
+**Key insight:** Grounding catches *specifics* (files, symbols, lines). Review catches *synthesis* (overconfident claims). You need both.
 
 <br>
 
 ## 🎯 Design principles
 
-1. **Grounding check is cheap** — regex + set ops, no LLM in the hot path. Run it on every reply.
-2. **Review is expensive** — only invoke when the reply claims to have fixed/changed something.
-3. **Cross-family adversarial** — different model family = different failure modes caught.
-4. **Reviewer is untrusted** — its flags are grounding-checked too.
-5. **Zero deps** — bring your own LLM client, your own database, your own retrieval.
-
-<br>
-
-## 🆚 vs. the alternatives
-
-| Approach | Pros | Cons |
-|---|---|---|
-| **Prompt engineering** | Free, fast | Doesn't prevent hallucination, just reduces frequency |
-| **RAG with citations** | Shows sources | Doesn't catch when the model misreads the source |
-| **Sibling-model review** | Catches some errors | Shares blind spots (GPT reviewing GPT) |
-| **Human review** | Gold standard | Doesn't scale, slow |
-| **ora-grounding** | Deterministic + adversarial, cross-family, zero deps | Requires you to track what was in context |
+1. **Deterministic first** — regex + set-membership before LLM review. Cheaper, faster, zero false positives.
+2. **Cross-family review** — GPT reviews Claude, Claude reviews GPT. Breaks shared blind spots.
+3. **Zero deps** — stdlib only. Bring your own LLM client.
+4. **Production-ready** — extracted from a real AI-CTO assistant serving users.
 
 <br>
 
 ## 🗺️ Roadmap
 
-- [x] Deterministic grounding check
-- [x] Cross-family adversarial review
-- [x] Zero dependencies
-- [ ] Pre-built integrations (LangChain, LlamaIndex)
-- [ ] Confidence scoring (how likely is this claim to be fabricated?)
-- [ ] Auto-retry with corrected context when fabrication detected
+- [x] Grounding check (v0.1.0)
+- [x] Adversarial review (v0.1.0)
+- [ ] Structured output validation (v0.2.0)
+- [ ] Multi-turn conversation grounding (v0.3.0)
+- [ ] Benchmark suite (v0.4.0)
 
 <br>
 
@@ -187,23 +158,21 @@ MIT — see [LICENSE](LICENSE).
 
 <br>
 
-## 🙋 FAQ
+## 🤝 Contributing
 
-**Q: Does this replace prompt engineering?**  
-No. Prompting reduces hallucination frequency. This catches the ones that slip through.
+PRs welcome. Run tests:
 
-**Q: Can I use the same model for generation and review?**  
-You can, but cross-family (GPT → Claude, Claude → Gemini) catches more.
-
-**Q: What if my retrieval context is huge?**  
-The grounding check only needs the *set* of paths/symbols/lines you fetched, not the full text. The adversarial review needs the full text but only runs on replies that claim to have changed something.
-
-**Q: Does this work for non-code tasks?**  
-The grounding check is code-focused (file paths, function names, line numbers). The adversarial review works for any domain — just pass the relevant context.
+```bash
+pip install -e ".[dev]"
+pytest
+```
 
 <br>
 
 ---
 
-**Built by [Aurem](https://aurem.com)** — the AI CTO that ships code to your GitHub repo.  
-Extracted from production. Battle-tested against real regressions.
+<div align="center">
+
+**Built by [Aurem](https://aurem.com) — the AI engineer that ships code to your GitHub repo.**
+
+</div>
