@@ -79,19 +79,21 @@ Zero dependencies. Python 3.10+.
 from ora_grounding.grounding import extract_claims, classify_claims
 
 # 1. Your agent generates a reply
-reply = "Fixed auth.py line 42 and added redis_lock.py"
+reply = "Fixed auth in backend/routers/auth.py line 42"
 
 # 2. Build the canonical set from your retrieval context
 canonical = {
-    "paths": {"backend/auth.py"},  # redis_lock.py doesn't exist
+    "paths": {"backend/routers/auth.py"},
     "basenames": {"auth.py"},
-    "defs": set(),
+    "defs": {"verify_token", "login"},
 }
 
 # 3. Check
-result = classify_claims(extract_claims(reply), canonical=canonical)
-print(result)
-# {'fabricated': ['redis_lock.py'], 'unverified': ['line 42']}
+claims = extract_claims(reply)
+result = classify_claims(claims, canonical=canonical)
+
+if result["fabricated"]:
+    print(f"⚠️  Fabricated: {result['fabricated']}")
 ```
 
 ### Adversarial review
@@ -99,50 +101,40 @@ print(result)
 ```python
 from ora_grounding.review import adversarial_review
 
-# Your agent's draft reply
-draft = "Fixed the payment retry logic in payments_client.py"
-
-# The retrieval context it had
-context = """File: backend/services/payments.py
-class PaymentService:
-    def process_payment(self, amount): ...
-"""
-
-# Review with a different-family LLM
-result = adversarial_review(
-    draft=draft,
-    context=context,
-    reviewer_llm=your_llm_function,  # e.g. Anthropic Claude
+# After the grounding check passes, run a cross-family review
+review_result = adversarial_review(
+    draft_reply=reply,
+    retrieval_context=your_rag_chunks,
+    reviewer_llm=your_llm_client,  # Different family from the drafter
 )
 
-if result["flags"]:
-    print("Reviewer found issues:", result["flags"])
+if review_result["flags"]:
+    print(f"🚩 Review flags: {review_result['flags']}")
 ```
 
 <br>
 
-## 📊 vs. the alternatives
+## 📊 Vs. the alternatives
 
-| Approach | Speed | Catches fabricated files | Catches overconfident synthesis | Cross-family |
+| Approach | Speed | Catches fabricated paths | Catches overconfident synthesis | Cross-family |
 |---|---|---|---|---|
 | **Prompting alone** | Fast | ❌ | ❌ | N/A |
-| **Same-family review** | Slow | ⚠️ | ⚠️ | ❌ |
-| **ora-grounding** | Fast | ✅ | ✅ | ✅ |
+| **Sibling-model review** | Slow | ⚠️ | ⚠️ | ❌ |
+| **ora-grounding** | Fast (grounding) + Slow (review) | ✅ | ✅ | ✅ |
 
-- **Prompting alone** — "Be accurate. Don't hallucinate." — doesn't work. The model doesn't know when it's wrong.
-- **Same-family review** — GPT-4 reviewing GPT-4 shares blind spots. Both models have the same training biases.
-- **ora-grounding** — deterministic check + adversarial cross-family review. Different models, different failure modes.
+- **Prompting alone** — "Be accurate. Don't hallucinate." — doesn't work. The model doesn't *know* it's hallucinating.
+- **Sibling-model review** — GPT-4 reviewing GPT-4 shares blind spots. Same training data, same failure modes.
+- **ora-grounding** — Deterministic check (fast) + adversarial review (slow, opt-in) with a different-family reviewer.
 
 <br>
 
 ## 🗺️ Roadmap
 
 - [x] Deterministic grounding check
-- [x] Cross-family adversarial review
-- [ ] Pre-built reviewer configs (Claude, Gemini, Llama)
-- [ ] Batch review API
-- [ ] Confidence scoring
-- [ ] Integration examples (LangChain, LlamaIndex)
+- [x] Adversarial review with cross-family LLM
+- [ ] Structured output validation (Pydantic models)
+- [ ] Multi-turn conversation grounding
+- [ ] Benchmark suite (public dataset)
 
 <br>
 
@@ -152,21 +144,10 @@ MIT — see [LICENSE](LICENSE).
 
 <br>
 
-## 🤝 Contributing
+## 🙏 Credits
 
-PRs welcome. Run tests:
-
-```bash
-pip install -e ".[dev]"
-pytest
-```
-
-<br>
+Extracted from [AUREM](https://aurem.com) — an AI-CTO assistant that reads your GitHub repo and ships code. Built by the AUREM team.
 
 ---
 
-<div align="center">
-
-**Built by [Polaris Built Inc.](https://polarisbuilt.com)** · Extracted from production AI-CTO assistant
-
-</div>
+**Questions?** Open an issue or reach out at [support@aurem.com](mailto:support@aurem.com).
