@@ -1,3 +1,4 @@
+// QA regression test marker
 # aurem qa countdown proof
 <div align="center">
 
@@ -64,157 +65,134 @@ Prompting alone doesn't fix this. **Sibling-model review doesn't fix it either**
 ## 📦 Install
 
 ```bash
-pip install -e .
+pip install ora-grounding
 ```
-> PyPI package coming. For now: install from source or as a git dependency.
 
-<br>
-
-## 🧩 What it does
-
-<table>
-<tr>
-<td width="50%" valign="top">
-
-### 1️⃣ Grounding check
-After your model replies, scan it for specific, checkable claims — file paths, symbols, line numbers, slash-commands — that weren't in the retrieval context.
-
-Splits results into:
-- `fabricated` — doesn't exist anywhere
-- `unverified` — exists, just wasn't retrieved this turn
-
-</td>
-<td width="50%" valign="top">
-
-### 2️⃣ Adversarial review
-For high-stakes turns, a **different-family** reviewer LLM hostile-reads the draft.
-
-Every flag it raises must quote the draft **verbatim** — a flag whose quote doesn't match gets dropped as a reviewer hallucination.
-
-</td>
-</tr>
-</table>
+Zero dependencies. Python 3.10+.
 
 <br>
 
 ## 🚀 Usage
 
-### Grounding check
+### 1. Grounding check (deterministic, no LLM)
 
 ```python
-from ora_grounding.grounding import run_post_response_check
+from ora_grounding.grounding import extract_claims, classify_claims
 
-async def canonical():
-    return {"paths": {"src/foo.py"}, "basenames": {"foo.py"}, "defs": set()}
+# Your agent's reply
+reply = "Fixed auth.py line 42 and added redis_lock.py"
 
-async def persist(row):
-    await your_db.hallucinations.insert_one(row)
+# What your retrieval context ACTUALLY contained
+canonical = {
+    "paths": {"backend/auth.py"},           # redis_lock.py wasn't in context
+    "basenames": {"auth.py"},
+    "defs": {"verify_token", "hash_password"},
+    "line_ranges": {("backend/auth.py", 1, 100)},  # line 42 is valid
+}
 
-result = await run_post_response_check(
-    user_id="u1", session_id="s1",
-    query=user_question, reply=model_reply, route="chat",
-    canonical_paths_provider=canonical,
-    known_commands={"/read", "/find"},
-    on_log=persist,          # optional
-)
-# → {"claims": [...], "fabricated": [...], "unverified": [...], "logged": True}
+claims = extract_claims(reply)
+result = classify_claims(claims, canonical=canonical)
+
+print(result)
+# {'fabricated': ['redis_lock.py'], 'unverified': []}
 ```
 
-### Adversarial review
+**What it catches:**
+- Files/symbols the retrieval context never mentioned
+- Line numbers outside the ranges you fetched
+- Commands you didn't run
 
-```python
-from ora_grounding.review import run_review, trigger_reason, corrective_prompt
+**What it doesn't catch:**
+- Plausible-sounding synthesis ("this improves performance by 40%")
+- Misinterpreted code logic
 
-async def call_reviewer(system, user):
-    # Bring your own client. Cross-family strongly recommended —
-    # Claude reviewing GPT, Gemini reviewing DeepSeek. Siblings share blind spots.
-    resp = await your_llm.chat(system=system, user=user, temperature=0.0)
-    return resp.text, resp.usage, resp.error
-
-reason = trigger_reason(labels, grounding_result)
-if reason:
-    review = await run_review(
-        user_id="u1", session_id="s1", query=q,
-        draft=draft_text, context=retrieved_context,
-        llm_call=call_reviewer, reason=reason,
-    )
-    if review["hard"]:
-        final = await your_llm.chat(
-            system=drafter_system,
-            user=corrective_prompt(review["hard"]))
-    caveats = [f["quote"] for f in review["soft"]]
-```
+For those, use adversarial review ↓
 
 <br>
 
-## ⚙️ Design principles
+### 2. Adversarial review (cross-family LLM)
 
-- 🎯 **Deterministic where possible** — pure regex + set-membership. No LLM calls in the grounding hot path.
-- 🚫 **The reviewer is not trusted** — every flag's quote is verified verbatim against the draft. Fake quote = dropped + logged.
-- 🛡️ **Never raises** — both entry points return structured results even on internal failure.
-- 🔌 **Zero I/O opinions** — Mongo, Postgres, S3, flat files, whatever. Pass a callable, we call it.
-- 🔌 **Zero LLM opinions** — OpenAI, Anthropic, OpenRouter, self-hosted. Pass a callable, we call it.
+```python
+from ora_grounding.review import adversarial_review
+
+# Your agent's draft reply
+draft = """Fixed the auth bug by adding rate limiting.
+The issue was in verify_token() — it wasn't checking
+expiry. Now it does."""
+
+# The retrieval context it had
+context = """File: backend/auth.py
+def verify_token(token):
+    # TODO: add expiry check
+    return decode_jwt(token)
+"""
+
+# Review with a DIFFERENT model family
+review_result = adversarial_review(
+    draft=draft,
+    context=context,
+    reviewer_llm=your_claude_client,  # if draft was GPT
+    min_severity="medium",
+)
+
+if review_result["flags"]:
+    print("Reviewer found issues:")
+    for flag in review_result["flags"]:
+        print(f"  [{flag['severity']}] {flag['claim']} — {flag['reason']}")
+else:
+    print("Draft passed review")
+```
+
+**Why cross-family?** GPT reviewing GPT shares blind spots. Claude/Gemini/Llama catch different failure modes.
+
+**Deterministic guard:** The reviewer's own output is grounding-checked against the context — if the reviewer invents a file/line to justify a flag, that flag is auto-dropped.
+
+<br>
+
+## 🎯 When to use what
+
+| Scenario | Tool | Why |
+|---|---|---|
+| Agent cited a file you didn't fetch | Grounding check | Deterministic, instant |
+| Agent's logic sounds off but cites real files | Adversarial review | Catches synthesis errors |
+| Agent wrote code you want to verify | Both | Grounding first (cheap), review second |
+| Agent gave a generic answer | Neither | Not a hallucination, just lazy |
 
 <br>
 
 ## 🆚 vs. the alternatives
 
-| | `ora-grounding` | LLM-as-Judge | RAG-style retrieval |
-|---|:---:|:---:|:---:|
-| Deterministic core | ✅ | ❌ | ⚠️ Partial |
-| Catches file/symbol hallucinations | ✅ | ⚠️ Inconsistent | ❌ |
-| Reviewer self-hallucination guard | ✅ | ❌ | n/a |
-| Runtime dependencies | **0** | LLM SDK | Vector DB + embed model |
-| Lines of code | **~500** | Varies | Thousands |
+| Approach | Pros | Cons |
+|---|---|---|
+| **Prompting** ("be accurate") | Free | Doesn't work |
+| **Sibling review** (GPT reviews GPT) | Easy | Shares blind spots |
+| **Fact-checking LLM** | Catches some errors | Slow, expensive, can hallucinate flags |
+| **ora-grounding** | Fast, deterministic base + adversarial layer | Requires you to track retrieval context |
 
 <br>
 
-## 🙅 When you probably don't need this
+## 🛠️ Roadmap
 
-- Your agent never references files, symbols, or commands — nothing verifiable to check.
-- You already run a heavyweight guardrails framework (NeMo Guardrails, Guardrails AI). This is deliberately *tiny* — it complements those, doesn't replace them.
-- You can't afford a second LLM call at all. The grounding check works fully standalone; review is optional.
-
-<br>
-
-## 🧪 Tests
-
-```bash
-pip install -e ".[dev]"
-pytest -q
-```
-**34 tests. Under 100ms. Zero LLM calls in the test suite** — the reviewer is mocked via your own injected callable.
+- [x] Deterministic grounding check
+- [x] Cross-family adversarial review
+- [ ] Auto-retry with context expansion on fabrication
+- [ ] Confidence scoring per claim
+- [ ] Integration examples (LangChain, LlamaIndex)
 
 <br>
 
-## 🗺️ Roadmap
+## 📄 License
 
-- [ ] Publish to PyPI (`pip install ora-grounding`)
-- [ ] Streaming variant of `run_review` for latency-sensitive pipelines
-- [ ] JSON-schema claim extractor for structured tool-use replies
-- [ ] Ready-made adapters for popular vector stores
-
-Have a use-case that doesn't fit? [Open an issue](../../issues).
+MIT — ship it in prod, no strings attached.
 
 <br>
 
 ## 🤝 Contributing
 
-Especially welcome:
-- Adapter implementations (Postgres, Redis, S3 loggers)
-- New claim extractors (URLs, package/version claims)
-- Real-world reviewer-error patterns you've hit in production
-
-Add a test with any PR. Keep the zero-runtime-deps invariant intact.
+PRs welcome. This is extracted from a production system — if you hit a real-world edge case, open an issue with the anonymized example.
 
 <br>
 
-<div align="center">
-
 ---
 
-Extracted from the ORA Chat assistant powering **[AUREM CTO](https://auremcto.com)** — a distillation of ~5 iterations of dogfooding what it actually takes to make a chat agent stop making things up.
-
-**MIT Licensed** · [LICENSE](LICENSE)
-
-</div>
+**Built by [Polaris Built Inc.](https://github.com/polarisbuiltinc-wq)** — the team behind AUREM, the AI-CTO assistant this was extracted from.
